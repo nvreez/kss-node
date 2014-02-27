@@ -3,7 +3,7 @@
 var kss = require(__dirname + '/../lib/kss.js'),
 	preCompiler = kss.precompilers,
 	handlebars = require('handlebars'),
-	cleanCss = require('clean-css'),
+	CleanCss = require('clean-css'),
 	optimist = require('optimist'),
 	marked = require('marked'),
 	wrench = require('wrench'),
@@ -65,10 +65,12 @@ argv = require('optimist')
 	.alias('i', 'init')
 	.describe('i', 'Create a new styleguide template to work from')
 
-	.alias('i', 'init')
-	.describe('i', 'Create a new styleguide template to work from')
+	.string('p')
+	.alias('p', 'preprocessor')
+	.describe('p', 'A specific preprocessor command to use for compiling to css')
 
 	.argv;
+
 
 // Create a new styleguide template to play with using the `--init` tag.
 if (argv.init) {
@@ -115,7 +117,11 @@ try {
 
 wrench.copyDirSyncRecursive(
 	options.templateDirectory + '/public',
-	options.destinationDirectory + '/public'
+	options.destinationDirectory + '/public',
+	{
+		preserveFiles: false,
+		forceDelete: true
+	}
 );
 
 // Generate the static HTML pages in the next tick, i.e. after the other functions have
@@ -128,7 +134,7 @@ process.nextTick(function() {
 			throw err;
 		}
 
-		css = cleanCss.process(css);
+		css = new CleanCss().minify(css);
 
 		// Write the compiled LESS styles from the template.
 		fs.writeFileSync(options.destinationDirectory + '/public/kss.css', css, 'utf8');
@@ -158,7 +164,7 @@ process.nextTick(function() {
 			// Accumulate all of the sections' first indexes
 			// in case they don't have a root element.
 			for (i = 0; i < sectionCount; i += 1) {
-				currentRoot = sections[i].reference().match(/[0-9]*\.?/)[0].replace('.', '');
+				currentRoot = sections[i].reference().match(/[\w]*\.?/)[0].replace('.', '');
 
 				if (!~sectionRoots.indexOf(currentRoot)) {
 					sectionRoots.push(currentRoot);
@@ -192,7 +198,7 @@ generateStylesheet = function(argv) {
 
 	console.log('...compiling additional stylesheets');
 
-	files = [ false, 'less', 'stylus', 'sass', 'css' ].map(function (type) {
+	files = [ false, 'less', 'stylus', 'sass', 'scss', 'css' ].map(function (type) {
 		var key = type || 'style';
 
 		if (!argv[key]) return;
@@ -205,7 +211,6 @@ generateStylesheet = function(argv) {
 
 	async.reduce(files, [], function (combined, group, next) {
 		if (!group) return next(null, combined)
-
 
 		async.map(group.files, function (filename, next) {
 			var type = group.type
@@ -224,7 +229,7 @@ generateStylesheet = function(argv) {
 			console.log(' - ' + filename + ' (' + type + ')')
 
 			if (type === 'css') return next(null, fs.readFileSync(filename, 'utf8'))
-			compilers[type].render(filename, next)
+			compilers[type].render(filename, next, argv)
 
 		}, function(err, output) {
 			if (err) return next(err)
@@ -241,7 +246,6 @@ generateStylesheet = function(argv) {
 // Used by generateStylesheet to minify and then
 // save its final buffer to a single CSS file.
 saveStylesheet = function(buffer) {
-	buffer = cleanCss.process(buffer.toString());
 	fs.writeFileSync(
 		options.destinationDirectory + '/public/style.css',
 		buffer, 'utf8'
@@ -319,9 +323,9 @@ jsonModifiers = function(modifiers) {
  */
 handlebars.registerHelper('ifAny', function() {
 	var argLength = arguments.length - 2,
-		content = arguments[argLength + 1],
+		options = arguments[arguments.length - 1],
 		success = true;
-
+	
 	for (var i = 0; i < argLength; i += 1) {
 		if (!arguments[i]) {
 			success = false;
@@ -329,7 +333,7 @@ handlebars.registerHelper('ifAny', function() {
 		}
 	}
 
-	return success ? content(this) : content.inverse(this);
+	return success ? options.fn(this) : options.inverse(this);
 });
 
 /**
@@ -348,7 +352,7 @@ handlebars.registerHelper('section', function(reference) {
  * a query for all children and descendants of that reference.
  * @param  {Mixed} query The section query
  */
-handlebars.registerHelper('eachSection', function(query) {
+handlebars.registerHelper('eachSection', function(query, options) {
 	var sections,
 		i, l, buffer = "";
 
@@ -360,7 +364,7 @@ handlebars.registerHelper('eachSection', function(query) {
 
 	l = sections.length;
 	for (i = 0; i < l; i += 1) {
-		buffer += arguments[arguments.length-1](sections[i].data);
+		buffer += options.fn(sections[i].data);
 	}
 
 	return buffer;
@@ -369,7 +373,7 @@ handlebars.registerHelper('eachSection', function(query) {
 /**
  * Loop over each section root, i.e. each section only one level deep.
  */
-handlebars.registerHelper('eachRoot', function() {
+handlebars.registerHelper('eachRoot', function(options) {
 	var sections,
 		i, l, buffer = "";
 
@@ -377,8 +381,13 @@ handlebars.registerHelper('eachRoot', function() {
 	if (!sections) return '';
 
 	l = sections.length;
+
 	for (i = 0; i < l; i += 1) {
-		buffer += arguments[arguments.length-1](sections[i].data);
+		data = sections[i].data
+		isCurrentRoot = data.reference === this.rootNumber;
+		data.isCurrentRoot = isCurrentRoot;
+		buffer += options.fn(data);
+		delete data.isCurrentRoot;
 	}
 
 	return buffer;
@@ -393,15 +402,15 @@ handlebars.registerHelper('eachRoot', function() {
  * 	 ANYTHING ELSE
  * {{/refDepth}}
  */
-handlebars.registerHelper('whenDepth', function(depth, context) {
-	if (!(context && this.refDepth)) {
+handlebars.registerHelper('whenDepth', function(depth, options) {
+	if (!(options && this.refDepth)) {
 		return '';
 	}
 	if (depth == this.refDepth) {
-		return context(this);
+		return options.fn(this);
 	}
-	if (context.inverse) {
-		return context.inverse(this);
+	if (options.inverse) {
+		return options.inverse(this);
 	}
 });
 
@@ -409,18 +418,16 @@ handlebars.registerHelper('whenDepth', function(depth, context) {
  * Similar to the {#eachSection} helper, however will loop over each modifier
  * @param  {Object} section Supply a section object to loop over it's modifiers. Defaults to the current section.
  */
-handlebars.registerHelper('eachModifier', function(section) {
+handlebars.registerHelper('eachModifier', function(options) {
 	var modifiers, i, l, buffer = '';
-
-	// Default to current modifiers, but allow supplying a custom section
-	if (section.data) modifiers = section.data.modifiers;
+	
 	modifiers = modifiers || this.modifiers || false;
 
 	if (!modifiers) return {};
 
 	l = modifiers.length;
 	for (i = 0; i < l; i++) {
-		buffer += arguments[arguments.length-1](modifiers[i].data || '');
+		buffer += options.fn(modifiers[i].data || '');
 	}
 	return buffer;
 });
@@ -448,6 +455,15 @@ handlebars.registerHelper('modifierMarkup', function(modifier) {
 		new kss.KssModifier(modifier).markup()
 	);
 });
+
+/**
+ * Output the string in all uppercase (useful for headers/links)
+ * @param {String} the string to upper case
+ */
+handlebars.registerHelper('toUpper', function(str) {
+	return str.toUpperCase();
+});
+
 
 /**
  * Quickly avoid escaping strings
